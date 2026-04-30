@@ -190,7 +190,7 @@ export function useInfiniteProjects(search?: string) {
     queryFn: ({ pageParam }) => fetchProjectsPaginated({ pageParam, search }),
     initialPageParam: 0,
     getNextPageParam: (lastPage, allPages) => {
-      if (!lastPage.hasMore) return undefined;
+      if (!lastPage.hasMore || lastPage.data.length === 0) return undefined;
       return allPages.length * PAGE_SIZE;
     },
   });

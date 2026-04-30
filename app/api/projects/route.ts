@@ -22,54 +22,95 @@ export async function GET(request: Request) {
     // Get API client with session token
     const client = getMySqlApiClient(async () => session.access_token);
 
-    // MySQL API uses page-based pagination, convert offset to page
-    const perPage = limit ? parseInt(limit, 10) : 50;
-    const page = offset ? Math.floor(parseInt(offset, 10) / perPage) + 1 : 1;
+    const isPaginated = limit !== null || offset !== null;
 
-    // Fetch both campaigns and pitches in parallel (include channels for deliverables)
-    const [campaignsResponse, pitchesResponse] = await Promise.all([
-      client.getCampaigns({
-        page,
-        per_page: perPage,
-        search: search || undefined,
-        brand_id: brandId || undefined,
-        include: 'channels',
-      }),
-      client.getPitches({
-        page,
-        per_page: perPage,
-        search: search || undefined,
-        brand_id: brandId || undefined,
-        include: 'channels',
-      }),
-    ]);
+    // Helper to fetch all pages from an API endpoint
+    async function fetchAllPages(
+      fetchFn: (params: any) => Promise<any>,
+      params: { search?: string; brand_id?: string; include: string },
+    ): Promise<any[]> {
+      const allItems: any[] = [];
+      let currentPage = 1;
+      const pageSize = 500;
+      let hasMore = true;
 
-    // Debug logging - show full response to diagnose issues
-    console.log('[Projects API] Campaigns FULL response:', JSON.stringify(campaignsResponse, null, 2));
-    console.log('[Projects API] Pitches FULL response:', JSON.stringify(pitchesResponse, null, 2));
+      while (hasMore) {
+        const response = await fetchFn({
+          ...params,
+          page: currentPage,
+          per_page: pageSize,
+        });
 
-    // Check for error responses - return early if both failed
-    if (campaignsResponse?.error && pitchesResponse?.error) {
-      console.error('[Projects API] Both campaigns and pitches failed');
-      return NextResponse.json(
-        {
-          success: false,
-          error: 'Failed to fetch campaigns and pitches',
-          campaignsError: campaignsResponse.error.message,
-          pitchesError: pitchesResponse.error.message,
-          data: [],
-        },
-        { status: 500 }
-      );
+        if (response?.error) break;
+
+        const items = response?.data?.data || response?.data || [];
+        allItems.push(...items);
+
+        const meta = response?.data?.meta || response?.meta;
+        const lastPage = meta?.last_page || 1;
+        hasMore = currentPage < lastPage;
+        currentPage++;
+      }
+
+      return allItems;
     }
 
-    // Get actual data from responses - handle various possible response structures
-    // MySQL API might return: { success: true, data: [...] } or { success: true, data: { data: [...], meta: {...} } }
-    const campaignsData = campaignsResponse?.data?.data || campaignsResponse?.data || [];
-    const pitchesData = pitchesResponse?.data?.data || pitchesResponse?.data || [];
+    let campaignsData: any[];
+    let pitchesData: any[];
+    let hasMore: boolean;
 
-    console.log('[Projects API] Campaigns count:', campaignsData.length);
-    console.log('[Projects API] Pitches count:', pitchesData.length);
+    if (isPaginated) {
+      // Paginated mode (infinite scroll) - fetch single page
+      const perPage = limit ? parseInt(limit, 10) : 50;
+      const page = offset ? Math.floor(parseInt(offset, 10) / perPage) + 1 : 1;
+
+      const [campaignsResponse, pitchesResponse] = await Promise.all([
+        client.getCampaigns({
+          page,
+          per_page: perPage,
+          search: search || undefined,
+          brand_id: brandId || undefined,
+          include: 'channels',
+        }),
+        client.getPitches({
+          page,
+          per_page: perPage,
+          search: search || undefined,
+          brand_id: brandId || undefined,
+          include: 'channels',
+        }),
+      ]);
+
+      if (campaignsResponse?.error && pitchesResponse?.error) {
+        return NextResponse.json(
+          {
+            success: false,
+            error: 'Failed to fetch campaigns and pitches',
+            campaignsError: campaignsResponse.error.message,
+            pitchesError: pitchesResponse.error.message,
+            data: [],
+          },
+          { status: 500 }
+        );
+      }
+
+      campaignsData = campaignsResponse?.data?.data || campaignsResponse?.data || [];
+      pitchesData = pitchesResponse?.data?.data || pitchesResponse?.data || [];
+      hasMore = (campaignsData.length + pitchesData.length) >= perPage;
+    } else {
+      // Non-paginated mode - fetch all pages internally
+      const fetchParams = {
+        search: search || undefined,
+        brand_id: brandId || undefined,
+        include: 'channels',
+      };
+
+      [campaignsData, pitchesData] = await Promise.all([
+        fetchAllPages(client.getCampaigns.bind(client), fetchParams),
+        fetchAllPages(client.getPitches.bind(client), fetchParams),
+      ]);
+      hasMore = false;
+    }
 
     // Transform campaigns to projects
     const campaignProjects = campaignsData.map((campaign: any) => ({
@@ -163,20 +204,13 @@ export async function GET(request: Request) {
     // No client-side filtering needed - MySQL API handles it
     const filteredData = data;
 
-    // Combine totals from both responses
-    const campaignsMeta = campaignsResponse?.data?.meta || campaignsResponse?.meta;
-    const pitchesMeta = pitchesResponse?.data?.meta || pitchesResponse?.meta;
-    const total = (campaignsMeta?.total || 0) + (pitchesMeta?.total || 0);
-
-    // Calculate hasMore based on combined pagination
-    const lastPage = Math.max(campaignsMeta?.last_page || 1, pitchesMeta?.last_page || 1);
-    const hasMore = page < lastPage;
+    const total = filteredData.length;
 
     return NextResponse.json({
-      success: campaignsResponse.success && pitchesResponse.success,
+      success: true,
       data: filteredData,
-      total: total,
-      hasMore: hasMore,
+      total,
+      hasMore,
     });
   } catch (error) {
     console.error("Failed to fetch projects:", error);

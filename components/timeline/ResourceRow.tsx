@@ -38,6 +38,15 @@ import { Button } from "@/components/ui/button";
 import { WORK_DAYS_PER_WEEK } from "@/lib/constants";
 import { useAuth } from "@/context/AuthContext";
 
+// Helper to extract deliverables from assignment notes
+const extractDeliverables = (note: string | null): string[] => {
+  if (!note) return [];
+  // Regex to match "Deliverable(s): Name1, Name2..."
+  const match = note.match(/Deliverable[s]?:\s*([^.\n]+)/);
+  if (!match) return [];
+  return match[1].split(',').map(d => d.trim()).filter(Boolean);
+};
+
 interface ResourceRowProps {
   resource: Resource;
   days: Date[];
@@ -313,15 +322,14 @@ const AllocationCell = React.memo<AllocationCellProps>(function AllocationCell({
 
   return (
     <div
-      className="shrink-0 h-[60px] border-r border-white/20 flex flex-col overflow-hidden"
+      className="shrink-0 h-[30px] border-r border-white/20 flex flex-col overflow-hidden"
       style={{ width: `${cellWidth}px` }}
     >
       {/* KOTAK PLAN (Atas - Warna Blue, shading by %) */}
       <div
         className={cn(
           "flex-1 flex items-center justify-center text-[11px] font-bold transition-all",
-          planStyles.text, planStyles.border,
-          planPct > 0 ? "border-b border-white/20" : "border-b border-dashed"
+          planStyles.text, planStyles.border
         )}
         style={{ backgroundColor: planStyles.bgColor }}
       >
@@ -329,7 +337,7 @@ const AllocationCell = React.memo<AllocationCellProps>(function AllocationCell({
       </div>
 
       {/* KOTAK ACTUAL (Bawah - Warna Green, shading by %) */}
-      <div
+      {/* <div
         className={cn(
           "flex-1 flex items-center justify-center text-[11px] font-bold transition-all",
           actualStyles.text, actualStyles.border
@@ -337,7 +345,7 @@ const AllocationCell = React.memo<AllocationCellProps>(function AllocationCell({
         style={{ backgroundColor: actualStyles.bgColor }}
       >
         {actualStyles.label}
-      </div>
+      </div> */}
     </div>
   );
 });
@@ -839,6 +847,85 @@ export const ResourceRow: React.FC<ResourceRowProps> = ({ resource, days, brandI
     });
   }, [resourceProjects, brandId, resourceAssignments, days]);
 
+  const projectMap = useMemo(() => new Map(projects.map(p => [p.id, p])), [projects]);
+
+  // New logic: Group projects by deliverables (Primary: Deliverable, Secondary: Project)
+  const deliverableGroups = useMemo(() => {
+    const groupsMap = new Map<string, Array<{
+      id: string;
+      project: Project;
+      planAssignments: Assignment[];
+      actualAssignments: ActualAssignment[];
+    }>>();
+
+    sortedProjects.forEach(project => {
+      const projectPlanAssignments = resourceAssignments.filter(a => a.projectId === project.id && !a.isTimeOff);
+      const projectActualAssignments = actualAssignments.filter(a => a.projectUuid === project.id && !a.isTimeOff);
+
+      // Find all unique deliverables mentioned in assignments for this project
+      const deliverableSet = new Set<string>();
+      
+      projectPlanAssignments.forEach(a => {
+        const deliverables = extractDeliverables(a.note);
+        if (deliverables.length === 0) {
+          deliverableSet.add("__GENERAL__");
+        } else {
+          deliverables.forEach(d => deliverableSet.add(d));
+        }
+      });
+
+      projectActualAssignments.forEach(a => {
+        const deliverables = extractDeliverables(a.note);
+        if (deliverables.length === 0) {
+          deliverableSet.add("__GENERAL__");
+        } else {
+          deliverables.forEach(d => deliverableSet.add(d));
+        }
+      });
+
+      if (deliverableSet.size === 0) {
+        deliverableSet.add("__GENERAL__");
+      }
+
+      deliverableSet.forEach(delName => {
+        if (!groupsMap.has(delName)) {
+          groupsMap.set(delName, []);
+        }
+        
+        const name = delName === "__GENERAL__" ? null : delName;
+        
+        const rowPlanAssignments = projectPlanAssignments.filter(a => {
+          const deliverables = extractDeliverables(a.note);
+          if (name === null) return deliverables.length === 0;
+          return deliverables.includes(name);
+        });
+
+        const rowActualAssignments = projectActualAssignments.filter(a => {
+          const deliverables = extractDeliverables(a.note);
+          if (name === null) return deliverables.length === 0;
+          return deliverables.includes(name);
+        });
+
+        groupsMap.get(delName)!.push({
+          id: `${project.id}-${delName}`,
+          project,
+          planAssignments: rowPlanAssignments,
+          actualAssignments: rowActualAssignments
+        });
+      });
+    });
+
+    // Convert map to sorted array of groups
+    return Array.from(groupsMap.keys()).sort((a, b) => {
+      if (a === "__GENERAL__") return -1;
+      if (b === "__GENERAL__") return 1;
+      return a.localeCompare(b);
+    }).map(delName => ({
+      name: delName === "__GENERAL__" ? null : delName,
+      projects: groupsMap.get(delName)!
+    }));
+  }, [sortedProjects, resourceAssignments, actualAssignments]);
+
   // Set default 5 project pertama saat data siap
   useEffect(() => {
     if (!isProjectsInitialized && sortedProjects.length > 0) {
@@ -856,11 +943,7 @@ export const ResourceRow: React.FC<ResourceRowProps> = ({ resource, days, brandI
     return sortedProjects.filter(p => selectedProjectIds.has(p.id));
   }, [sortedProjects, selectedProjectIds, isProjectsInitialized]);
 
-  // O(1) project lookup by ID
-  const projectMap = useMemo(() =>
-    new Map(projects.map(p => [p.id, p])),
-    [projects]
-  );
+
 
   // Check if has time off
   const hasTimeOff = resourceAssignments.some(a => a.isTimeOff);
@@ -2136,634 +2219,278 @@ export const ResourceRow: React.FC<ResourceRowProps> = ({ resource, days, brandI
           </>
         )}
 
-        {/* Project Rows - 3 rows per project (Header + Plan + Actual) */}
-        {visibleProjects.map((project) => {
-          const brand = brands.find(b => b.id === project.brandId);
-
-          // Filter plan assignments (from assignments table) - include all statuses
-          const planAssignments = resourceAssignments.filter(
-            a => a.projectId === project.id && !a.isTimeOff && (() => {
-              const hours = parseFloat(a.hoursPerDay);
-              return isNaN(hours) ? true : hours > 0;
-            })()
-          );
-
-          // Filter actual assignments (from actual table) - Struktur sama dengan assignments
-          const projectActualAssignments = actualAssignments.filter(a =>
-            a.projectUuid === project.id
-          );
+        {deliverableGroups.map((group) => {
+          const visibleProjectsInGroup = group.projects.filter(row => selectedProjectIds.has(row.project.id));
+          if (visibleProjectsInGroup.length === 0) return null;
 
           return (
-            <React.Fragment key={project.id}>
-              {/* Project Group Container */}
-              <div className="flex flex-col">
-                {/* Sidebar - Merged for PLAN & ACTUAL */}
-                <div className="flex" data-testid="project-group" data-resource-id={resource.id} data-project-id={project.id}>
-                  <div className="w-[250px] shrink-0 px-4 py-2 border-r sticky left-0 bg-background z-20 flex pl-12" style={{ height: 80 }}>
-                    <div className="flex items-center gap-2 w-4/6">
-                      <div className="w-4 h-4 rounded flex items-center justify-center shrink-0" style={{ backgroundColor: project.color }}>
-                        <Icon icon="lucide:folder" className="h-3 w-3 text-white" />
-                      </div>
-                      <div className="flex flex-col justify-center min-w-0">
-                        <div className="text-sm font-semibold truncate">{project.name}</div>
-                        <div className="text-xs text-muted-foreground truncate">{brand?.name}</div>
-                      </div>
-                    </div>
-                    <div className="flex flex-col justify-center gap-2 text-xs font-semibold w-2/5">
-                      <span className="text-blue-600">PLAN</span>
-                      <span className="text-green-600">ACTUAL</span>
-                    </div>
-                  </div>
+            <React.Fragment key={group.name || 'general'}>
+            {/* Deliverable Header Row */}
+            <div className="flex bg-gray-100/50 h-[32px] border-b">
+              <div className="w-[250px] shrink-0 px-4 border-r sticky left-0 bg-gray-100/50 z-20 flex items-center gap-2 pl-12 h-[32px]">
+                <Icon icon="lucide:package" className="h-3.5 w-3.5 text-blue-600" />
+                <span className="text-xs font-bold text-blue-800 uppercase tracking-wider">
+                  {group.name || 'GENERAL / OTHER'}
+                </span>
+              </div>
+              <div className="flex-1 flex" style={{ width: `${days.length * cellWidth}px` }}>
+                {days.map((day) => (
+                  <div key={day.toISOString()} className="shrink-0 h-[32px] border-r border-white/20" style={{ width: `${cellWidth}px` }} />
+                ))}
+              </div>
+            </div>
 
-                  {/* Timeline Content Container */}
-                  <div className="flex-1 flex flex-col">
-                    {/* PLAN Row - from assignments table */}
-                    <div className="flex-1 bg-blue-50/30" style={{ height: 40 }} data-testid="plan-row" data-resource-id={resource.id} data-project-id={project.id}>
-                      {!session?.access.can_view_all ? (
-                        <div
-                          ref={(el) => { if (el) projectTimelineRefs.current.set(`plan-${project.id}`, el); }}
-                          className="flex relative"
-                          style={{ width: `${days.length * cellWidth}px`, height: 40 }}
-                        >
-                          {days.map((day) => (
-                            <div key={day.toISOString()} className="shrink-0 h-[40px] border-r border-white/20 bg-gray-100/50" style={{ width: `${cellWidth}px` }} />
-                          ))}
-                          {/* Show plan assignments but disabled (no click, resize, drag) */}
-                          {planAssignments.map((assignment) => (
-                            <AssignmentBlock
-                              key={assignment.id}
-                              assignment={assignment}
-                              project={projectMap.get(assignment.projectId ?? '')}
-                              days={days}
-                              resourceRowHeight={40}
-                              cellWidth={cellWidth}
-                              isWeekView={isWeekView}
-                              onUpdate={handleUpdateAssignment}
-                              onDelete={handleDeleteAssignment}
-                              timeOffAssignments={timeOffAssignments}
-                              isUpdating={updatingAssignmentId === assignment.id}
-                              disabled={true}
-                            />
-                          ))}
+            {/* Projects under this deliverable */}
+            {visibleProjectsInGroup.map((row) => {
+              const { project, planAssignments, actualAssignments: projectActualAssignments } = row;
+              const brand = brands.find(b => b.id === project.brandId);
+              return (
+                <React.Fragment key={row.id}>
+                  {/* Project Row Container */}
+                  <div className="flex flex-col border-b">
+                    {/* Sidebar - Merged for PLAN & ACTUAL */}
+                    <div className="flex" data-testid="project-group" data-resource-id={resource.id} data-project-id={project.id}>
+                      <div className="w-[250px] shrink-0 px-4 py-2 border-r sticky left-0 bg-background z-20 flex pl-16" style={{ height: 40 }}>
+                        <div className="flex items-center gap-2 w-4/6">
+                          <div className="w-3.5 h-3.5 rounded flex items-center justify-center shrink-0" style={{ backgroundColor: project.color }}>
+                            <Icon icon="lucide:folder" className="h-2.5 w-2.5 text-white" />
+                          </div>
+                          <div className="flex flex-col justify-center min-w-0">
+                            <div className="text-sm font-semibold truncate">
+                              {project.name}
+                            </div>
+                            <div className="text-[10px] text-muted-foreground truncate">{brand?.name}</div>
+                          </div>
                         </div>
-                      ) : (
-                        <div
-                          ref={(el) => { if (el) projectTimelineRefs.current.set(`plan-${project.id}`, el); }}
-                          className="flex relative"
-                          style={{ width: `${days.length * cellWidth}px`, height: 40 }}
-                        >
-                          {!isWeekView && days.map((day, dayIndex) => (
-                            <DraggableTimelineCell
-                              key={day.toISOString()}
-                              day={day}
-                              projectId={project.id}
-                              projectColor={project.color}
-                              days={days}
-                              cellWidth={cellWidth}
-                              cellHeight={40}
-                              timeOffAssignments={timeOffAssignments}
-                              containerRef={projectTimelineRefs.current.get(`plan-${project.id}`) || null}
-                              onDragComplete={(startDay, endDay) =>
-                                handleDragComplete(project.id, startDay, endDay)
-                              }
-                              disabled={createAssignment.isPending}
-                              isDragging={isDraggingRef.current && dragProjectIdRef.current === project.id && dragRowTypeRef.current === 'plan'}
-                              isInDragRange={isInDragRange(dayIndex, 'plan')}
-                              onMouseDown={(index, containerRef) => handleDragStart(index, project.id, project.color, containerRef, 'plan')}
-                              rowType="plan"
-                            />
-                          ))}
-                          {/* Plan Assignments */}
-                          {isWeekView ? (
-                            // For Quarter/HalfYear/Year view, use WeeklyAssignmentBlock
-                            // Note: Month view now shows daily columns like week view
-                            <>
-                              {(() => {
-                                // Group assignments by month index to render one block per project per month
-                                const monthMap = new Map<number, { planAssignments: Assignment[]; hasAdjustment: boolean }>();
+                        <div className="flex flex-col justify-center gap-2 text-[10px] font-semibold w-2/5">
+                          <span className="text-blue-600">PLAN</span>
+                        </div>
+                      </div>
 
-                                for (const assignment of planAssignments) {
-                                  const assignStart = startOfDay(new Date(assignment.startDate));
-                                  const assignEnd = startOfDay(new Date(assignment.endDate));
-
-                                  for (let i = 0; i < days.length; i++) {
-                                    const monthStart = startOfMonth(days[i]);
-                                    const monthEnd = endOfMonth(monthStart);
-
-                                    if (assignEnd >= monthStart && assignStart <= monthEnd) {
-                                      if (!monthMap.has(i)) {
-                                        monthMap.set(i, { planAssignments: [], hasAdjustment: false });
-                                      }
-                                      const entry = monthMap.get(i)!;
-                                      entry.planAssignments.push(assignment);
-                                      if (assignment.isAdjustment) entry.hasAdjustment = true;
-                                    }
+                      {/* Timeline Content Container */}
+                      <div className="flex-1 flex flex-col">
+                        {/* PLAN Row */}
+                        <div className="flex-1 bg-blue-50/10" style={{ height: 40 }} data-testid="plan-row" data-resource-id={resource.id} data-project-id={project.id}>
+                          {!session?.access.can_view_all ? (
+                            <div
+                              ref={(el) => { if (el) projectTimelineRefs.current.set(`plan-${row.id}`, el); }}
+                              className="flex relative"
+                              style={{ width: `${days.length * cellWidth}px`, height: 40 }}
+                            >
+                              {days.map((day) => (
+                                <div key={day.toISOString()} className="shrink-0 h-[40px] border-r border-white/20 bg-gray-100/50" style={{ width: `${cellWidth}px` }} />
+                              ))}
+                              {/* Show plan assignments but disabled */}
+                              {planAssignments.map((assignment) => (
+                                <AssignmentBlock
+                                  key={assignment.id}
+                                  assignment={assignment}
+                                  project={projectMap.get(assignment.projectId ?? '')}
+                                  days={days}
+                                  resourceRowHeight={40}
+                                  cellWidth={cellWidth}
+                                  isWeekView={isWeekView}
+                                  onUpdate={handleUpdateAssignment}
+                                  onDelete={handleDeleteAssignment}
+                                  timeOffAssignments={timeOffAssignments}
+                                  isUpdating={updatingAssignmentId === assignment.id}
+                                  disabled={true}
+                                />
+                              ))}
+                            </div>
+                          ) : (
+                            <div
+                              ref={(el) => { if (el) projectTimelineRefs.current.set(`plan-${row.id}`, el); }}
+                              className="flex relative"
+                              style={{ width: `${days.length * cellWidth}px`, height: 40 }}
+                            >
+                              {!isWeekView && days.map((day, dayIndex) => (
+                                <DraggableTimelineCell
+                                  key={day.toISOString()}
+                                  day={day}
+                                  projectId={project.id}
+                                  projectColor={project.color}
+                                  days={days}
+                                  cellWidth={cellWidth}
+                                  cellHeight={40}
+                                  timeOffAssignments={timeOffAssignments}
+                                  containerRef={projectTimelineRefs.current.get(`plan-${row.id}`) || null}
+                                  onDragComplete={(startDay, endDay) =>
+                                    handleDragComplete(project.id, startDay, endDay)
                                   }
-                                }
+                                  disabled={createAssignment.isPending}
+                                  isDragging={isDraggingRef.current && dragProjectIdRef.current === project.id && dragRowTypeRef.current === 'plan'}
+                                  isInDragRange={isInDragRange(dayIndex, 'plan')}
+                                  onMouseDown={(index, containerRef) => handleDragStart(index, project.id, project.color, containerRef, 'plan')}
+                                  rowType="plan"
+                                />
+                              ))}
+                              {/* Plan Assignments */}
+                              {isWeekView ? (
+                                <>
+                                  {(() => {
+                                    const monthMap = new Map<number, { planAssignments: Assignment[]; hasAdjustment: boolean }>();
 
-                                const blocks: React.ReactNode[] = [];
+                                    for (const assignment of planAssignments) {
+                                      const assignStart = startOfDay(new Date(assignment.startDate));
+                                      const assignEnd = startOfDay(new Date(assignment.endDate));
 
-                                monthMap.forEach(({ planAssignments: monthAssignments, hasAdjustment }, monthIndex) => {
-                                  const monthStart = startOfMonth(days[monthIndex]);
-                                  const monthEnd = endOfMonth(monthStart);
+                                      for (let i = 0; i < days.length; i++) {
+                                        const monthStart = startOfMonth(days[i]);
+                                        const monthEnd = endOfMonth(monthStart);
 
-                                  // Calculate total for this month by summing hours_per_day for each working day
-                                  // Split into original vs adjustment
-                                  let monthlyTotal = 0;
-                                  let originalTotal = 0;
-                                  let adjustmentTotal = 0;
-
-                                  let currentDay = new Date(monthStart);
-                                  while (currentDay <= monthEnd) {
-                                    const dayOfWeek = currentDay.getDay();
-
-                                    if (dayOfWeek !== 0 && dayOfWeek !== 6) {
-                                      for (const a of monthAssignments) {
-                                        const aStart = startOfDay(new Date(a.startDate));
-                                        const aEnd = startOfDay(new Date(a.endDate));
-                                        const hours = parseFloat(a.hoursPerDay) || 0;
-
-                                        if (currentDay >= aStart && currentDay <= aEnd) {
-                                          monthlyTotal += hours;
-                                          if (a.isAdjustment) {
-                                            adjustmentTotal += hours;
-                                          } else {
-                                            originalTotal += hours;
+                                        if (assignEnd >= monthStart && assignStart <= monthEnd) {
+                                          if (!monthMap.has(i)) {
+                                            monthMap.set(i, { planAssignments: [], hasAdjustment: false });
                                           }
+                                          const entry = monthMap.get(i)!;
+                                          entry.planAssignments.push(assignment);
+                                          if (assignment.isAdjustment) entry.hasAdjustment = true;
                                         }
                                       }
                                     }
 
-                                    currentDay = new Date(currentDay);
-                                    currentDay.setDate(currentDay.getDate() + 1);
-                                  }
+                                    const blocks: React.ReactNode[] = [];
 
-                                  monthlyTotal = Math.round(monthlyTotal * 10) / 10;
-                                  originalTotal = Math.round(originalTotal * 10) / 10;
-                                  adjustmentTotal = Math.round(adjustmentTotal * 10) / 10;
+                                    monthMap.forEach(({ planAssignments: monthAssignments, hasAdjustment }, monthIndex) => {
+                                      const monthStart = startOfMonth(days[monthIndex]);
+                                      const monthEnd = endOfMonth(monthStart);
 
-                                  // Use the first non-adjustment assignment as representative, or first adjustment
-                                  const representative = monthAssignments.find(a => !a.isAdjustment) || monthAssignments[0];
+                                      let monthlyTotal = 0;
+                                      let originalTotal = 0;
+                                      let adjustmentTotal = 0;
 
-                                  const cellPercentage = 100 / days.length;
-                                  const leftOffset = monthIndex * cellPercentage;
-                                  const width = cellPercentage;
-
-                                  blocks.push(
-                                    <div
-                                      key={`project-${project.id}-month-${monthIndex}`}
-                                      className="absolute rounded-md shadow-sm border text-xs text-white overflow-hidden flex flex-col bg-blue-600 hover:bg-blue-700 cursor-pointer"
-                                      style={{
-                                        left: `${leftOffset}%`,
-                                        width: `${width}%`,
-                                        top: 4,
-                                        height: 36,
-                                        zIndex: 10,
-                                      }}
-                                      title={`${project.name}: ${monthlyTotal}h${adjustmentTotal > 0 ? ` (${originalTotal}h plan + ${adjustmentTotal}h adj)` : ''}`}
-                                      onClick={(e) => {
-                                        e.stopPropagation();
-                                        const clickedDay = days[monthIndex];
-                                        const ms = startOfMonth(clickedDay);
-                                        const me = new Date(ms.getFullYear(), ms.getMonth() + 1, 0);
-                                        handleProjectRowClick(
-                                          ms, me, project,
-                                          e.clientX, e.clientY,
-                                          representative,
-                                          monthlyTotal,
-                                          originalTotal,
-                                          adjustmentTotal
-                                        );
-                                      }}
-                                    >
-                                      {adjustmentTotal > 0 && (
-                                        <div
-                                          className="absolute top-0 right-0 rounded-r-md"
-                                          style={{
-                                            width: `${(adjustmentTotal / monthlyTotal) * 100}%`,
-                                            height: '100%',
-                                            backgroundColor: 'rgba(147, 197, 253, 0.4)',
-                                          }}
-                                        />
-                                      )}
-                                      <div className="flex-1 px-2 py-1 min-w-0 pointer-events-none flex flex-col justify-center relative z-10">
-                                        <div className="font-bold truncate text-xs">
-                                          {project.name}
-                                        </div>
-                                        <div className="truncate opacity-90 text-xs">
-                                          {adjustmentTotal > 0
-                                            ? `${originalTotal}h + ${adjustmentTotal}h adj`
-                                            : `${monthlyTotal}h`
+                                      let currentDay = new Date(monthStart);
+                                      while (currentDay <= monthEnd) {
+                                        const dayOfWeek = currentDay.getDay();
+                                        if (dayOfWeek !== 0 && dayOfWeek !== 6) {
+                                          for (const a of monthAssignments) {
+                                            const aStart = startOfDay(new Date(a.startDate));
+                                            const aEnd = startOfDay(new Date(a.endDate));
+                                            const hours = parseFloat(a.hoursPerDay) || 0;
+                                            if (currentDay >= aStart && currentDay <= aEnd) {
+                                              monthlyTotal += hours;
+                                              if (a.isAdjustment) adjustmentTotal += hours;
+                                              else originalTotal += hours;
+                                            }
                                           }
+                                        }
+                                        currentDay = new Date(currentDay);
+                                        currentDay.setDate(currentDay.getDate() + 1);
+                                      }
+
+                                      monthlyTotal = Math.round(monthlyTotal * 10) / 10;
+                                      originalTotal = Math.round(originalTotal * 10) / 10;
+                                      adjustmentTotal = Math.round(adjustmentTotal * 10) / 10;
+
+                                      const representative = monthAssignments.find(a => !a.isAdjustment) || monthAssignments[0];
+                                      const cellPercentage = 100 / days.length;
+                                      const leftOffset = monthIndex * cellPercentage;
+                                      const width = cellPercentage;
+
+                                      blocks.push(
+                                        <div
+                                          key={`project-${row.id}-month-${monthIndex}`}
+                                          className="absolute rounded shadow-sm border text-[10px] text-white overflow-hidden flex flex-col bg-blue-600 hover:bg-blue-700 cursor-pointer"
+                                          style={{
+                                            left: `${leftOffset}%`,
+                                            width: `${width}%`,
+                                            top: 4,
+                                            height: 32,
+                                            zIndex: 10,
+                                          }}
+                                          title={`${project.name}${group.name ? ` - ${group.name}` : ''}: ${monthlyTotal}h`}
+                                          onClick={(e) => {
+                                            e.stopPropagation();
+                                            const clickedDay = days[monthIndex];
+                                            const ms = startOfMonth(clickedDay);
+                                            const me = new Date(ms.getFullYear(), ms.getMonth() + 1, 0);
+                                            handleProjectRowClick(ms, me, project, e.clientX, e.clientY, representative, monthlyTotal, originalTotal, adjustmentTotal);
+                                          }}
+                                        >
+                                          {adjustmentTotal > 0 && (
+                                            <div className="absolute top-0 right-0 rounded-r" style={{ width: `${(adjustmentTotal / monthlyTotal) * 100}%`, height: '100%', backgroundColor: 'rgba(147, 197, 253, 0.4)' }} />
+                                          )}
+                                          <div className="flex-1 px-1.5 py-0.5 min-w-0 pointer-events-none flex flex-col justify-center relative z-10">
+                                            <div className="font-bold truncate">{project.name}</div>
+                                            <div className="truncate opacity-90">{monthlyTotal}h</div>
+                                          </div>
                                         </div>
+                                      );
+                                    });
+
+                                    return blocks;
+                                  })()}
+                                  <div
+                                    className="absolute inset-0 z-0"
+                                    onMouseMove={(e) => {
+                                      if (!isMonthRangeView) return;
+                                      const containerRect = e.currentTarget.getBoundingClientRect();
+                                      const x = e.clientX - containerRect.left;
+                                      const dayIndex = Math.floor(x / cellWidth);
+                                      setHoveredMonthIndex(dayIndex);
+                                      setHoveredProjectId(project.id);
+                                      setHoveredRowType('plan');
+                                    }}
+                                    onMouseLeave={() => { setHoveredMonthIndex(null); setHoveredProjectId(null); setHoveredRowType(null); }}
+                                    onClick={(e) => {
+                                      if (!isMonthRangeView) return;
+                                      const containerRect = e.currentTarget.getBoundingClientRect();
+                                      const x = e.clientX - containerRect.left;
+                                      const dayIndex = Math.floor(x / cellWidth);
+                                      const clickedDay = days[Math.max(0, Math.min(dayIndex, days.length - 1))];
+                                      const monthStart = startOfDay(startOfMonth(clickedDay));
+                                      const monthEnd = startOfDay(new Date(monthStart.getFullYear(), monthStart.getMonth() + 1, 0));
+                                      handleProjectRowClick(monthStart, monthEnd, project, e.clientX, e.clientY);
+                                    }}
+                                    style={{ pointerEvents: 'auto', cursor: 'cell' }}
+                                  />
+                                  {isMonthRangeView && hoveredProjectId === project.id && hoveredRowType === 'plan' && hoveredMonthIndex !== null && (() => {
+                                    const monthStart = startOfMonth(days[hoveredMonthIndex]);
+                                    const monthEnd = endOfMonth(monthStart);
+                                    const hasAssignmentInMonth = planAssignments.some(assignment => {
+                                      const assignStart = startOfDay(new Date(assignment.startDate));
+                                      const assignEnd = startOfDay(new Date(assignment.endDate));
+                                      return assignEnd >= monthStart && assignStart <= monthEnd;
+                                    });
+                                    return !hasAssignmentInMonth;
+                                  })() && (
+                                    <div className="absolute pointer-events-none z-10" style={{ left: `${hoveredMonthIndex * cellWidth + cellWidth / 2}px`, top: '50%', transform: 'translate(-50%, -50%)' }}>
+                                      <div className="w-6 h-6 rounded-full flex items-center justify-center text-white shadow bg-blue-600">
+                                        <Icon icon="lucide:plus" className="h-3 w-3" />
                                       </div>
                                     </div>
-                                  );
-                                });
-
-                                return blocks;
-                              })()}
-                              {/* Invisible overlay for detecting clicks on empty space */}
-                              <div
-                                className="absolute inset-0 z-0"
-                                onMouseMove={(e) => {
-                                  // Only handle in month range view
-                                  if (!isMonthRangeView) return;
-                                  const containerRect = e.currentTarget.getBoundingClientRect();
-                                  const x = e.clientX - containerRect.left;
-                                  const dayIndex = Math.floor(x / cellWidth);
-                                  setHoveredMonthIndex(dayIndex);
-                                  setHoveredProjectId(project.id);
-                                  setHoveredRowType('plan');
-                                }}
-                                onMouseLeave={() => {
-                                  setHoveredMonthIndex(null);
-                                  setHoveredProjectId(null);
-                                  setHoveredRowType(null);
-                                }}
-                                onClick={(e) => {
-                                  // Only handle in month range view
-                                  if (!isMonthRangeView) return;
-                                  const containerRect = e.currentTarget.getBoundingClientRect();
-                                  const x = e.clientX - containerRect.left;
-                                  const dayIndex = Math.floor(x / cellWidth);
-                                  const clickedDay = days[Math.max(0, Math.min(dayIndex, days.length - 1))];
-
-                                  // Calculate month boundaries
-                                  const monthStart = startOfDay(startOfMonth(clickedDay));
-                                  const monthEnd = startOfDay(new Date(monthStart.getFullYear(), monthStart.getMonth() + 1, 0));
-
-                                  console.log('[Monthly Allocation Click]', {
-                                    clickedDay: clickedDay.toISOString(),
-                                    monthStart: monthStart.toISOString(),
-                                    monthEnd: monthEnd.toISOString(),
-                                    dayIndex,
-                                    totalDays: days.length
-                                  });
-
-                                  handleProjectRowClick(
-                                    monthStart,
-                                    monthEnd,
-                                    project,
-                                    e.clientX,
-                                    e.clientY
-                                    // No assignment = create mode
-                                  );
-                                }}
-                                style={{ pointerEvents: 'auto', cursor: 'cell' }}
-                              />
-                              {/* + indicator for month range views - only show if no assignment exists for this month */}
-                              {isMonthRangeView && hoveredProjectId === project.id && hoveredRowType === 'plan' && hoveredMonthIndex !== null && (() => {
-                                // Check if any assignment covers this month
-                                const monthStart = startOfMonth(days[hoveredMonthIndex]);
-                                const monthEnd = endOfMonth(monthStart);
-                                const hasAssignmentInMonth = planAssignments.some(assignment => {
-                                  const assignStart = startOfDay(new Date(assignment.startDate));
-                                  const assignEnd = startOfDay(new Date(assignment.endDate));
-                                  return assignEnd >= monthStart && assignStart <= monthEnd;
-                                });
-                                return !hasAssignmentInMonth;
-                              })() && (
-                                <div
-                                  className="absolute pointer-events-none z-10"
-                                  style={{
-                                    left: `${hoveredMonthIndex * cellWidth + cellWidth / 2}px`,
-                                    top: '50%',
-                                    transform: 'translate(-50%, -50%)'
-                                  }}
-                                >
-                                  <div
-                                    className="w-7 h-7 rounded-full flex items-center justify-center text-white shadow-md bg-blue-600"
-                                  >
-                                    <Icon icon="lucide:plus" className="h-4 w-4" />
-                                  </div>
-                                </div>
-                              )}
-                            </>
-                          ) : (
-                            // For Week view (day view), use regular AssignmentBlock
-                            planAssignments.map((assignment) => (
-                              <AssignmentBlock
-                                key={assignment.id}
-                                assignment={assignment}
-                                project={projectMap.get(assignment.projectId ?? '')}
-                                days={days}
-                                resourceRowHeight={40}
-                                cellWidth={cellWidth}
-                                isWeekView={isWeekView}
-                                onUpdate={handleUpdateAssignment}
-                                onDelete={handleDeleteAssignment}
-                                timeOffAssignments={timeOffAssignments}
-                                isUpdating={updatingAssignmentId === assignment.id}
-                              />
-                            ))
-                          )}
-                          {/* Drag preview overlay - PLAN only */}
-                          {(() => {
-                            // Use refs for synchronous access
-                            const shouldShow = isDraggingRef.current && dragProjectIdRef.current === project.id && dragRowTypeRef.current === 'plan';
-                            if (!shouldShow || dragStartIndex.current === null || dragEndIndexRef.current === null) return null;
-                            const startIdx = Math.min(dragStartIndex.current, dragEndIndexRef.current);
-                            const endIdx = Math.max(dragStartIndex.current, dragEndIndexRef.current);
-                            const boundaries = cellBoundariesRef.current;
-
-                            if (boundaries.length > 0 && boundaries[startIdx] && boundaries[endIdx]) {
-                              const left = boundaries[startIdx].left;
-                              const width = boundaries[endIdx].right - boundaries[startIdx].left;
-                              return (
-                                <div
-                                  className="absolute rounded-md opacity-80 flex items-center justify-center text-white text-xs font-medium pointer-events-none z-10"
-                                  style={{
-                                    top: 4,
-                                    height: 'calc(100% - 4px)',
-                                    backgroundColor: dragProjectColorRef.current,
-                                    left: `${left}px`,
-                                    width: `${width}px`,
-                                  }}
-                                >
-                                  {countWorkdays(days[startIdx], days[endIdx])} workdays
-                                </div>
-                              );
-                            }
-                            return null;
-                          })()}
-                        </div>
-                      )}
-                    </div>
-
-                    {/* ACTUAL Row - from actual table */}
-                    <div className="flex-1 bg-green-50/30" style={{ height: 40 }} data-testid="actual-row" data-resource-id={resource.id} data-project-id={project.id}>
-                      <div
-                        ref={(el) => {
-                          if (el) {
-                            projectTimelineRefs.current.set(`actual-${project.id}`, el);
-                            console.log('[ACTUAL ROW] Container ref set for:', project.name);
-                          }
-                        }}
-                        className="flex relative"
-                        style={{ width: `${days.length * cellWidth}px`, height: 40 }}
-                      >
-                        {!isWeekView && days.map((day, dayIndex) => (
-                          <DraggableTimelineCell
-                            key={day.toISOString()}
-                            day={day}
-                            projectId={project.id}
-                            projectColor={project.color}
-                            days={days}
-                            cellWidth={cellWidth}
-                            cellHeight={40}
-                            timeOffAssignments={timeOffAssignments}
-                            containerRef={projectTimelineRefs.current.get(`actual-${project.id}`)}
-                            onDragComplete={(startDay, endDay) =>
-                              handleActualDragComplete(project.id, startDay, endDay)
-                            }
-                            disabled={createActualAssignment.isPending || resource.id !== session?.employee?.uuid}
-                            isDragging={isDraggingRef.current && dragProjectIdRef.current === project.id && dragRowTypeRef.current === 'actual'}
-                            isInDragRange={isInDragRange(dayIndex, 'actual')}
-                            onMouseDown={(index, containerRef) => handleDragStart(index, project.id, project.color, containerRef, 'actual')}
-                            rowType="actual"
-                          />
-                        ))}
-                        {/* Actual Assignments - Struktur sama dengan plan assignments */}
-                        {isWeekView ? (
-                          // For Quarter/HalfYear/Year view, use WeeklyAssignmentBlock (convert actual to plan format)
-                          // Note: Month view now shows daily columns like week view
-                          <>
-                            {projectActualAssignments.map((actualAssignment) => {
-                              // Find which month indices this assignment covers
-                              const coveredMonthIndices: number[] = [];
-                              const assignStart = startOfDay(new Date(actualAssignment.startDate));
-                              const assignEnd = startOfDay(new Date(actualAssignment.endDate));
-
-                              for (let i = 0; i < days.length; i++) {
-                                const monthStart = startOfMonth(days[i]);
-                                const monthEnd = endOfMonth(monthStart);
-
-                                if (assignEnd >= monthStart && assignStart <= monthEnd) {
-                                  coveredMonthIndices.push(i);
-                                }
-                              }
-
-                              return coveredMonthIndices.map((monthIndex) => {
-                                const monthStart = startOfMonth(days[monthIndex]);
-                                const monthEnd = endOfMonth(monthStart);
-
-                                // Calculate total for this month by summing hours_per_day for ALL days (including weekends)
-                                const monthlyTotal = (() => {
-                                  let total = 0;
-
-                                  // Iterate through each day in the month (including weekends)
-                                  let currentDay = new Date(monthStart);
-                                  while (currentDay <= monthEnd) {
-                                    // For this day, sum up hours from all actual assignments for this project
-                                    const dayHours = projectActualAssignments
-                                      .filter(a => a.projectUuid === project.id && !a.isTimeOff)
-                                      .reduce((sum, a) => {
-                                        const aStart = startOfDay(new Date(a.startDate));
-                                        const aEnd = startOfDay(new Date(a.endDate));
-
-                                        // Check if this assignment covers this day
-                                        if (currentDay >= aStart && currentDay <= aEnd) {
-                                          return sum + (parseFloat(a.hoursPerDay || '0') || 0);
-                                        }
-                                        return sum;
-                                      }, 0);
-
-                                    total += dayHours;
-
-                                    // Move to next day
-                                    currentDay = new Date(currentDay);
-                                    currentDay.setDate(currentDay.getDate() + 1);
-                                  }
-
-                                  return total;
-                                })();
-
-                                return (
-                                  <WeeklyAssignmentBlock
-                                    key={`${actualAssignment.uuid}-month-${monthIndex}`}
-                                    assignment={{
-                                      id: actualAssignment.uuid,
-                                      employeeId: actualAssignment.employeeUuid || '',
-                                      projectId: actualAssignment.projectUuid || '',
-                                      taskId: actualAssignment.taskUuid || null,
-                                      startDate: actualAssignment.startDate,
-                                      endDate: actualAssignment.endDate,
-                                      hoursPerDay: actualAssignment.hoursPerDay?.toString() ?? '0',
-                                      totalHours: null,
-                                      allocationPercentage: actualAssignment.allocationPercentage?.toString() ?? null,
-                                      isTimeOff: actualAssignment.isTimeOff,
-                                      isAdjustment: false,
-                                      timeOffTypeId: actualAssignment.timeOffTypeUuid,
-                                      category: actualAssignment.category as any,
-                                      isBillable: actualAssignment.isBillable,
-                                      status: actualAssignment.status as any,
-                                      note: actualAssignment.note,
-                                      createdById: actualAssignment.createdByUuid || null,
-                                      createdAt: actualAssignment.createdAt || new Date().toISOString(),
-                                      updatedAt: actualAssignment.updatedAt || new Date().toISOString(),
-                                    }}
-                                    project={projectMap.get(actualAssignment.projectUuid ?? '')}
+                                  )}
+                                </>
+                              ) : (
+                                planAssignments.map((assignment) => (
+                                  <AssignmentBlock
+                                    key={assignment.id}
+                                    assignment={assignment}
+                                    project={projectMap.get(assignment.projectId ?? '')}
                                     days={days}
+                                    resourceRowHeight={40}
                                     cellWidth={cellWidth}
-                                    isActual={true}
-                                    isMonthRangeView={isMonthRangeView}
-                                    monthlyTotalHours={Math.round(monthlyTotal * 10) / 10}
-                                    onClick={(e) => {
-                                      e.stopPropagation();
-                                      const clickedDay = days[monthIndex];
-                                      const mStart = startOfMonth(clickedDay);
-                                      const mEnd = new Date(mStart.getFullYear(), mStart.getMonth() + 1, 0);
-                                      handleActualRowClick(
-                                        mStart,
-                                        mEnd,
-                                        project,
-                                        e.clientX,
-                                        e.clientY,
-                                        actualAssignment,
-                                        Math.round(monthlyTotal * 10) / 10
-                                      );
-                                    }}
+                                    isWeekView={isWeekView}
+                                    onUpdate={handleUpdateAssignment}
+                                    onDelete={handleDeleteAssignment}
+                                    timeOffAssignments={timeOffAssignments}
+                                    isUpdating={updatingAssignmentId === assignment.id}
                                   />
-                                );
-                              });
-                            })}
-                            {/* Invisible overlay for detecting clicks on empty space (actual assignments) */}
-                            <div
-                              className="absolute inset-0 z-0"
-                              onMouseMove={(e) => {
-                                if (!isMonthRangeView) return;
-                                const containerRect = e.currentTarget.getBoundingClientRect();
-                                const x = e.clientX - containerRect.left;
-                                const dayIndex = Math.floor(x / cellWidth);
-                                setHoveredMonthIndex(dayIndex);
-                                setHoveredProjectId(project.id);
-                                setHoveredRowType('actual');
-                              }}
-                              onMouseLeave={() => {
-                                setHoveredMonthIndex(null);
-                                setHoveredProjectId(null);
-                                setHoveredRowType(null);
-                              }}
-                              onClick={(e) => {
-                                // Only handle in month range view
-                                if (!isMonthRangeView) return;
-                                const containerRect = e.currentTarget.getBoundingClientRect();
-                                const x = e.clientX - containerRect.left;
-                                const dayIndex = Math.floor(x / cellWidth);
-                                const clickedDay = days[Math.max(0, Math.min(dayIndex, days.length - 1))];
-
-                                // Calculate month boundaries
-                                const monthStart = startOfDay(startOfMonth(clickedDay));
-                                const monthEnd = startOfDay(new Date(monthStart.getFullYear(), monthStart.getMonth() + 1, 0));
-
-                                handleActualRowClick(
-                                  monthStart,
-                                  monthEnd,
-                                  project,
-                                  e.clientX,
-                                  e.clientY
-                                  // No assignment = create mode
-                                );
-                              }}
-                              style={{ pointerEvents: 'auto', cursor: 'cell' }}
-                            />
-                            {/* + indicator for month range views on actual row */}
-                            {isMonthRangeView && hoveredProjectId === project.id && hoveredRowType === 'actual' && hoveredMonthIndex !== null && (() => {
-                              const mStart = startOfMonth(days[hoveredMonthIndex]);
-                              const mEnd = endOfMonth(mStart);
-                              const hasActualInMonth = projectActualAssignments.some(a => {
-                                const assignStart = startOfDay(new Date(a.startDate));
-                                const assignEnd = startOfDay(new Date(a.endDate));
-                                return assignEnd >= mStart && assignStart <= mEnd;
-                              });
-                              return !hasActualInMonth;
-                            })() && (
-                              <div
-                                className="absolute pointer-events-none z-10"
-                                style={{
-                                  left: `${hoveredMonthIndex * cellWidth + cellWidth / 2}px`,
-                                  top: '50%',
-                                  transform: 'translate(-50%, -50%)'
-                                }}
-                              >
-                                <div
-                                  className="w-7 h-7 rounded-full flex items-center justify-center text-white shadow-md bg-green-600"
-                                >
-                                  <Icon icon="lucide:plus" className="h-4 w-4" />
-                                </div>
-                              </div>
-                            )}
-                          </>
-                        ) : (
-                          projectActualAssignments.map((actualAssignment) => {
-                            // Calculate planned/actual limits for this assignment's month
-                            const aMonthStart = startOfMonth(new Date(actualAssignment.startDate));
-                            const aMonthEnd = endOfMonth(aMonthStart);
-                            const aPlannedLimit = calculatePlannedHoursForMonth(resourceAssignments, actualAssignment.projectUuid || '', aMonthStart, aMonthEnd);
-                            const aCurrentActual = calculateActualHoursForMonth(
-                              actualAssignments,
-                              actualAssignment.projectUuid || '',
-                              aMonthStart,
-                              aMonthEnd,
-                              [actualAssignment.uuid] // Exclude this assignment from actual count (edit mode)
-                            );
-
-                            return (
-                            <ActualAssignmentBlock
-                              key={actualAssignment.uuid}
-                              assignment={actualAssignment}
-                              project={projectMap.get(actualAssignment.projectUuid ?? '')}
-                              days={days}
-                              resourceRowHeight={40}
-                              cellWidth={cellWidth}
-                              isWeekView={isWeekView}
-                              onUpdate={handleUpdateActualAssignment}
-                              onDelete={handleDeleteActualAssignment}
-                              timeOffAssignments={timeOffAssignments as any}
-                              disabled={actualAssignment.createdByUuid !== session?.employee?.uuid}
-                              plannedHoursLimit={aPlannedLimit}
-                              currentActualHours={aCurrentActual}
-                            />
-                            );
-                          })
-                        )}
-                        {/* Drag preview overlay for actual - ACTUAL only */}
-                        {(() => {
-                          // Use refs for synchronous access
-                          const shouldShow = isDraggingRef.current && dragProjectIdRef.current === project.id && dragRowTypeRef.current === 'actual';
-                          if (!shouldShow || dragStartIndex.current === null || dragEndIndexRef.current === null) return null;
-                          const startIdx = Math.min(dragStartIndex.current, dragEndIndexRef.current);
-                          const endIdx = Math.max(dragStartIndex.current, dragEndIndexRef.current);
-                          const boundaries = cellBoundariesRef.current;
-
-                          if (boundaries.length > 0 && boundaries[startIdx] && boundaries[endIdx]) {
-                            const left = boundaries[startIdx].left;
-                            const width = boundaries[endIdx].right - boundaries[startIdx].left;
-                            return (
-                              <div
-                                className="absolute rounded-md opacity-80 flex items-center justify-center text-white text-xs font-medium pointer-events-none z-10 bg-emerald-500"
-                                style={{
-                                  top: -4,
-                                  height: 'calc(100% - 4px)',
-                                  left: `${left}px`,
-                                  width: `${width}px`,
-                                }}
-                              >
-                                {countWorkdays(days[startIdx], days[endIdx])} workdays
-                              </div>
-                            );
-                          }
-                          return null;
-                        })()}
+                                ))
+                              )}
+                            </div>
+                          )}
+                        </div>
                       </div>
                     </div>
                   </div>
-                </div>
-              </div>
-            </React.Fragment>
-          );
-        })}
+                </React.Fragment>
+              );
+            })}
+          </React.Fragment>
+        );
+      })}
 
         {/* Project Filter Select Row */}
         {sortedProjects.length > PROJECT_DISPLAY_LIMIT && (
@@ -2791,59 +2518,100 @@ export const ResourceRow: React.FC<ResourceRowProps> = ({ resource, days, brandI
                   />
                 </Button>
 
-                {/* Popover/Dropdown Menu */}
+                {/* Centered Modal-style Dropdown */}
                 {isFilterOpen && (
                   <>
-                    {/* Invisible backdrop to close dropdown when clicking outside */}
+                    {/* Darker backdrop with blur */}
                     <div
-                      className="fixed inset-0 z-40"
+                      className="fixed inset-0 z-[90] bg-black/30 backdrop-blur-sm transition-opacity"
                       onClick={() => setIsFilterOpen(false)}
                     />
+                    
+                    <div className="fixed top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 w-[480px] max-w-[90vw] bg-background border border-border rounded-xl shadow-3xl z-[100] max-h-[75vh] flex flex-col overflow-hidden animate-in fade-in zoom-in duration-200">
+                      {/* Header */}
+                      <div className="px-6 py-4 border-b bg-muted/10 flex items-center justify-between sticky top-0 z-10 backdrop-blur-md">
+                        <div>
+                          <h3 className="text-base font-bold text-foreground">Select Projects</h3>
+                          <p className="text-xs text-muted-foreground mt-0.5">Showing {selectedProjectIds.size} of {sortedProjects.length} projects</p>
+                        </div>
+                        <Button 
+                          variant="ghost" 
+                          size="icon" 
+                          onClick={() => setIsFilterOpen(false)}
+                          className="h-8 w-8 rounded-full hover:bg-muted"
+                        >
+                          <Icon icon="lucide:x" className="h-4 w-4" />
+                        </Button>
+                      </div>
 
-                    {/* Ubah lebar menjadi w-[450px] dan tinggi menjadi max-h-[500px] */}
-                    <div className="absolute bottom-full left-0 mb-1 w-[450px] max-w-[95vw] bg-background border border-border rounded-md shadow-2xl z-50 max-h-[500px] overflow-y-auto py-2">
-                      {sortedProjects.map(p => {
-                        const isSelected = selectedProjectIds.has(p.id);
-                        const projectBrand = brands?.find(b => b.id === p.brandId);
+                      {/* Scrollable Project List */}
+                      <div className="flex-1 overflow-y-auto py-2 custom-scrollbar">
+                        {sortedProjects.map(p => {
+                          const isSelected = selectedProjectIds.has(p.id);
+                          const projectBrand = brands?.find(b => b.id === p.brandId);
 
-                        return (
-                          <label
-                            key={p.id}
-                            // Perbesar padding (px-5 py-2) dan jarak antar elemen (gap-3)
-                            className="flex items-start gap-3 px-5 py-2 transition-colors cursor-pointer hover:bg-muted/50 border-b border-border/50 last:border-0"
-                          >
-                            <input
-                              type="checkbox"
-                              // Perbesar ukuran checkbox menjadi h-5 w-5 (sebelumnya h-4 w-4 atau h-3 w-3)
-                              className="rounded border-primary text-primary focus:ring-primary h-5 w-5 mt-1 cursor-pointer shrink-0"
-                              checked={isSelected}
-                              onChange={() => {
-                                setSelectedProjectIds(prev => {
-                                  const next = new Set(prev);
-                                  if (next.has(p.id)) {
-                                    next.delete(p.id);
-                                  } else {
-                                    next.add(p.id);
-                                  }
-                                  return next;
-                                });
-                              }}
-                            />
-                            <div className="flex flex-col min-w-0">
-                              {/* Perbesar nama project menjadi text-base (ukuran standar teks website) dan lebih tebal */}
-                              <span className="text-sm font-semibold text-foreground leading-snug">
-                                {p.name}
-                              </span>
-                              {/* Perbesar nama brand menjadi text-sm (sebelumnya sangat kecil text-[10px]) */}
-                              {projectBrand && (
-                                <span className="text-sm text-muted-foreground mt-1">
-                                  {projectBrand.name}
+                          return (
+                            <label
+                              key={p.id}
+                              className="flex items-start gap-4 px-6 py-3 transition-colors cursor-pointer hover:bg-accent/50 border-b border-border/30 last:border-0 group"
+                            >
+                              <div className="pt-0.5">
+                                <input
+                                  type="checkbox"
+                                  className="rounded-md border-muted-foreground/30 text-primary focus:ring-primary h-5 w-5 cursor-pointer transition-transform group-hover:scale-105"
+                                  checked={isSelected}
+                                  onChange={() => {
+                                    setSelectedProjectIds(prev => {
+                                      const next = new Set(prev);
+                                      if (next.has(p.id)) {
+                                        next.delete(p.id);
+                                      } else {
+                                        next.add(p.id);
+                                      }
+                                      return next;
+                                    });
+                                  }}
+                                />
+                              </div>
+                              <div className="flex flex-col min-w-0">
+                                <span className="text-[14.5px] font-semibold text-foreground leading-tight">
+                                  {p.name}
                                 </span>
-                              )}
-                            </div>
-                          </label>
-                        );
-                      })}
+                                {projectBrand && (
+                                  <div className="flex items-center gap-1.5 mt-1">
+                                    <div className="w-1.5 h-1.5 rounded-full" style={{ backgroundColor: p.color }} />
+                                    <span className="text-xs text-muted-foreground font-medium">
+                                      {projectBrand.name}
+                                    </span>
+                                  </div>
+                                )}
+                              </div>
+                            </label>
+                          );
+                        })}
+                      </div>
+
+                      {/* Footer / Quick Actions */}
+                      <div className="px-6 py-3 border-t bg-muted/10 flex justify-end gap-2">
+                         <Button 
+                          variant="outline" 
+                          size="sm" 
+                          className="text-xs h-8"
+                          onClick={() => {
+                            setSelectedProjectIds(new Set());
+                          }}
+                         >
+                           Clear All
+                         </Button>
+                         <Button 
+                          variant="primary" 
+                          size="sm" 
+                          className="text-xs h-8 bg-primary text-white"
+                          onClick={() => setIsFilterOpen(false)}
+                         >
+                           Apply Selection
+                         </Button>
+                      </div>
                     </div>
                   </>
                 )}

@@ -4,7 +4,7 @@ import { useIsStuck } from "@/hooks/use-is-stuck";
 import { useDebounce } from "@/hooks/use-debounce";
 import { Skeleton } from "@/components/ui/skeleton";
 import React, { useState, useEffect, useMemo, useCallback } from "react";
-import { startOfMonth, endOfMonth, startOfDay, format, isSameMonth } from "date-fns";
+import { startOfMonth, endOfMonth, startOfDay, format, isSameMonth, eachMonthOfInterval } from "date-fns";
 import { type DateRange } from "react-day-picker";
 import { useProjects, useInfiniteProjects, type Project } from "@/lib/query/hooks/useProjects";
 import { useBrands } from "@/lib/query/hooks/useBrands";
@@ -123,6 +123,8 @@ export const ProjectSetup = () => {
   const [isSaving, setIsSaving] = useState(false);
   // Track initial deliverable selections to detect changes
   const [initialDeliverablesByEmployee, setInitialDeliverablesByEmployee] = useState<Record<string, string[]>>({});
+  // Track initial date range for change detection
+  const [initialDateRange, setInitialDateRange] = useState<DateRange | undefined>(undefined);
 
   const { data: projectAssignments = [] } = useAssignmentsByProject(viewingProject?.id ?? "");
   const { data: allAssignments = [] } = useAssignments();
@@ -280,12 +282,22 @@ export const ProjectSetup = () => {
           return `${format(monthDate, "MMM")}: ${Math.round(pct)}%`;
         });
 
+      // If no monthly percentages but date range is selected, show 0% for each month
+      let finalMonthlyPercentages = monthlyPercentages;
+      if (monthlyPercentages.length === 0 && dateRange?.from && dateRange?.to) {
+        const monthsInRange = eachMonthOfInterval({
+          start: startOfMonth(dateRange.from),
+          end: startOfMonth(dateRange.to),
+        });
+        finalMonthlyPercentages = monthsInRange.map(m => `${format(m, "MMM")}: 0%`);
+      }
+
       return {
         id: employeeId,
         fullName: emp?.fullName ?? "Unknown",
         position: emp?.position ?? "",
         department: emp?.department ?? null,
-        allocationPercentage: monthlyPercentages || "-",
+        allocationPercentage: finalMonthlyPercentages.length > 0 ? finalMonthlyPercentages : "-",
       };
     });
   }, [projectAssignments, pendingAssignments, employeeMap, dateRange]);
@@ -319,10 +331,18 @@ export const ProjectSetup = () => {
     return changes;
   }, [teamMembers, selectedDeliverablesByEmployee, pendingAssignments, initialDeliverablesByEmployee]);
 
-  // Check if there are any unsaved changes (pending assignments or deliverable changes)
+  // Check if date range has changed from initial
+  const hasDateRangeChanged = useMemo(() => {
+    if (!dateRange?.from || !dateRange?.to) return false;
+    if (!initialDateRange?.from || !initialDateRange?.to) return true;
+    return dateRange.from.getTime() !== initialDateRange.from.getTime()
+      || dateRange.to.getTime() !== initialDateRange.to.getTime();
+  }, [dateRange, initialDateRange]);
+
+  // Check if there are any unsaved changes (pending assignments, deliverable changes, or date range)
   const hasUnsavedChanges = useMemo(() => {
-    return pendingAssignments.length > 0 || unsavedDeliverableChanges.length > 0;
-  }, [pendingAssignments, unsavedDeliverableChanges]);
+    return pendingAssignments.length > 0 || unsavedDeliverableChanges.length > 0 || hasDateRangeChanged;
+  }, [pendingAssignments, unsavedDeliverableChanges, hasDateRangeChanged]);
 
   // Check if all pending/changed employees have deliverables selected
   const allHaveDeliverables = useMemo(() => {
@@ -381,7 +401,17 @@ export const ProjectSetup = () => {
       channelBudget: pc.channelBudget || pc.channel_budget || "",
       manHours: pc.manHours || pc.man_hours || "",
     })));
-    setDateRange(undefined);
+    if (project.startDate && project.endDate) {
+      const range = {
+        from: startOfDay(new Date(project.startDate)),
+        to: startOfDay(new Date(project.endDate)),
+      };
+      setDateRange(range);
+      setInitialDateRange(range);
+    } else {
+      setDateRange(undefined);
+      setInitialDateRange(undefined);
+    }
     setPendingAssignments([]);
     // Don't reset deliverables here - let the useEffect handle loading from existing assignments
     // Only reset if not already tracking this project
@@ -436,6 +466,25 @@ export const ProjectSetup = () => {
       setInitialDeliverablesByEmployee(deliverablesByEmployee);
     }
   }, [isDialogOpen, viewingProject?.id, projectAssignments, allDeliverables, initialDeliverablesByEmployee]);
+
+  // Initialize dateRange from projectAssignments when project has no saved dates
+  useEffect(() => {
+    if (!isDialogOpen || !viewingProject || projectAssignments.length === 0) return;
+    // Only run if dateRange hasn't been initialized yet (from project dates)
+    if (initialDateRange !== undefined) return;
+
+    const startDates = projectAssignments.map(a => new Date(a.startDate).getTime()).filter(Boolean);
+    const endDates = projectAssignments.map(a => new Date(a.endDate).getTime()).filter(Boolean);
+
+    if (startDates.length > 0 && endDates.length > 0) {
+      const range = {
+        from: startOfDay(new Date(Math.min(...startDates))),
+        to: startOfDay(new Date(Math.max(...endDates))),
+      };
+      setDateRange(range);
+      setInitialDateRange(range);
+    }
+  }, [isDialogOpen, viewingProject?.id, projectAssignments, initialDateRange]);
 
   // Group projects by brand
   // In default state: show all brands even if they have no projects
@@ -527,7 +576,18 @@ export const ProjectSetup = () => {
         });
       });
 
-      await Promise.all([...createPromises, ...updatePromises]);
+      // 3. Update existing assignments with new date range
+      const dateRangeUpdatePromises = hasDateRangeChanged
+        ? projectAssignments.map((a) =>
+            fetch(`/api/assignments/${a.id}`, {
+              method: 'PUT',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({ startDate: assignmentStartDate, endDate: assignmentEndDate }),
+            })
+          )
+        : [];
+
+      await Promise.all([...createPromises, ...updatePromises, ...dateRangeUpdatePromises]);
 
       // Update initial deliverables to match current selections (mark as saved)
       const newInitialDeliverables: Record<string, string[]> = { ...initialDeliverablesByEmployee };
@@ -546,6 +606,11 @@ export const ProjectSetup = () => {
       }
 
       setInitialDeliverablesByEmployee(newInitialDeliverables);
+
+      // Reset initial date range after save
+      if (hasDateRangeChanged && dateRange?.from && dateRange?.to) {
+        setInitialDateRange({ from: dateRange.from, to: dateRange.to });
+      }
 
       // Clear pending assignments after successful save
       setPendingAssignments([]);

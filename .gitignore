@@ -50,3 +50,4 @@ cookies.txt
 
 # debug scripts
 debug_*.js
+test-db-koneksi.ts

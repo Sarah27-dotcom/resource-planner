@@ -18,6 +18,7 @@ CREATE TABLE IF NOT EXISTS assignments (
   is_billable BOOLEAN DEFAULT TRUE,
   status VARCHAR(20) DEFAULT 'confirmed',
   note TEXT,
+  total_hours DECIMAL(10, 2) DEFAULT NULL,
   created_by_uuid VARCHAR(36),
   created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
   updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
@@ -41,10 +42,11 @@ END;
 $$ LANGUAGE plpgsql;
 
 -- Trigger to automatically update updated_at
+DROP TRIGGER IF EXISTS update_assignments_updated_at ON assignments;
 CREATE TRIGGER update_assignments_updated_at
   BEFORE UPDATE ON assignments
   FOR EACH ROW
-  EXECUTE FUNCTION update_updated_at_column();
+  EXECUTE PROCEDURE update_updated_at_column();
 
 -- Tabel actual (untuk actual assignments jika diperlukan)
 CREATE TABLE IF NOT EXISTS actual (
@@ -76,7 +78,8 @@ CREATE INDEX IF NOT EXISTS idx_actual_status ON actual(status);
 CREATE INDEX IF NOT EXISTS idx_actual_employee_dates ON actual(employee_uuid, start_date, end_date);
 
 -- Trigger for actual table updated_at
+DROP TRIGGER IF EXISTS update_actual_updated_at ON actual;
 CREATE TRIGGER update_actual_updated_at
   BEFORE UPDATE ON actual
   FOR EACH ROW
-  EXECUTE FUNCTION update_updated_at_column();
+  EXECUTE PROCEDURE update_updated_at_column();

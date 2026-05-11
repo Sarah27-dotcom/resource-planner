@@ -6,7 +6,7 @@ A workforce management and resource allocation system for managing employee assi
 
 - **Framework**: Next.js 16.1.1
 - **UI**: React 19, TypeScript, Tailwind CSS v4
-- **Database**: MySQL
+- **Database**: PostgreSQL (Primary) / MySQL
   - Main data via Timetrack API (employees, brands, projects, campaigns)
   - Assignments database for employee-project allocations
 - **External Integration**: Timetrack API for authentication and employee data
@@ -26,7 +26,7 @@ A workforce management and resource allocation system for managing employee assi
          │                 │
          ▼                 ▼
 ┌─────────────────┐ ┌─────────────────┐
-│  Timetrack API  │ │  MySQL          │
+│  Timetrack API  │ │  PostgreSQL     │
 │  (Auth/Employees)│ │  (Assignments)  │
 │  (Brands/Projects)│ │                 │
 └─────────────────┘ └─────────────────┘
@@ -54,17 +54,20 @@ A workforce management and resource allocation system for managing employee assi
 Before you begin, ensure you have the following installed:
 
 - **Node.js** v20 or higher
-- **MySQL Server** (local instance for assignments database)
-- **Timetrack API** running locally on port 8000 (required before starting)
+- **PostgreSQL** (local instance or Vercel Postgres / Supabase)
+- **Timetrack API** connectivity to `https://demo.timetrack.id/api/v1` (required before starting)
 
 ## Environment Configuration
 
 ### Local Development
 - **Resource Planner**: http://localhost:3000
-- **Timetrack API**: http://127.0.0.1:8000/api/v1
+- **Timetrack API**: https://demo.timetrack.id/api/v1
 
 ### Staging
-- **Resource Planner**: https://resource-planner-drab.vercel.app/
+- **Resource Planner**: [https://resource-planner-drab.vercel.app/](https://resource-planner-drab.vercel.app/)
+  - Deployed from: `https://github.com/Sarah27-dotcom/resource-planner.git`
+  - Branch: `develop-sarah`
+  - Database: Vercel Postgres / Supabase
 - **Timetrack API**: https://demo.timetrack.id/api/v1
 
 ## Step-by-Step Setup Guide
@@ -75,84 +78,33 @@ Before you begin, ensure you have the following installed:
 npm install
 ```
 
-### Step 2: Ensure Timetrack API is Running ⚠️ **IMPORTANT**
+### Step 2: Verify Timetrack API Connectivity
 
-The Timetrack API **must be running BEFORE** starting Resource Planner. It provides:
+Resource Planner connects directly to the Timetrack API at `https://demo.timetrack.id/api/v1`. It provides:
 - User authentication (login)
 - Employee data (department, position for RBAC)
+- Brand and Project data
 
-#### Setting Up Timetrack API Locally
-
-1. **Clone the timetrack repository** (if you haven't already):
-   ```bash
-   git clone https://gitlab.com/developerleverate/timetrack.git
-   cd timetrack
-   ```
-
-2. **Configure the `.env` file** in the timetrack directory:
-   ```bash
-   # Timetrack .env configuration
-   APP_NAME=Laravel
-   APP_ENV=local
-   APP_KEY=base64:GsYzXDEQ7uaUwZzAUGpAc4Z0o80m7Vs2DzYAL528EzE=
-   APP_URL=http://localhost
-
-   DB_CONNECTION=mysql
-   DB_HOST=127.0.0.1
-   DB_PORT=3306
-   DB_DATABASE=timetrack1
-   DB_USERNAME=root
-   DB_PASSWORD=
-
-   BROADCAST_DRIVER=log
-   CACHE_DRIVER=file
-   QUEUE_CONNECTION=sync
-   SESSION_DRIVER=file
-   SESSION_LIFETIME=120
-
-   REDIS_HOST=127.0.0.1
-   REDIS_PASSWORD=null
-   REDIS_PORT=6379
-
-   # Mailhog for email testing (local)
-   MAIL_MAILER=smtp
-   MAIL_HOST=mailhog
-   MAIL_PORT=1025
-   MAIL_USERNAME=null
-   MAIL_PASSWORD=null
-   MAIL_ENCRYPTION=null
-   ```
-
-3. **Install dependencies and run migrations**:
-   ```bash
-   composer install
-   php artisan migrate
-   ```
-
-4. **Start the Timetrack server**:
-   ```bash
-   php artisan serve
-   ```
-
-5. **Verify Timetrack is running**:
-   ```bash
-   curl http://127.0.0.1:8000/api/v1
-   ```
-
-   You should see a response from the API. Keep this server running in the background.
-
-### Step 3: Set Up MySQL Database (Assignments)
-
-Create the MySQL database for assignments:
-
+Verify connectivity:
 ```bash
-# Create the assignments database
-mysql -u root -p < lib/mysql-assignments/schema.sql
+curl https://demo.timetrack.id/api/v1
 ```
 
-This creates:
-- Database: `resource_planner_assignments`
-- Table: `assignments` (for employee-project allocations)
+### Step 3: Set Up PostgreSQL Database (Assignments)
+
+Resource Planner uses a PostgreSQL database for storing assignments.
+
+1. **Create/Import Database**:
+   Import the `resource_planner_assignments` database dump into your PostgreSQL instance.
+
+2. **Manual Schema Setup (If no dump available)**:
+   ```bash
+   psql your_database_url < lib/mysql-assignments/schema.postgres.sql
+   ```
+
+This database stores:
+- Table: `assignments` (for employee-project allocations/plan)
+- Table: `actual` (for actual time spent/allocation)
 
 ### Step 4: Configure Environment Variables
 
@@ -167,18 +119,25 @@ This creates:
    # ==========================================
    # Timetrack API Configuration (Required)
    # ==========================================
-   TIMETRACK_API_URL=http://127.0.0.1:8000/api/v1
+   TIMETRACK_API_URL=https://demo.timetrack.id/api/v1
 
    # ==========================================
    # MySQL REST API Configuration
    # ==========================================
-   MYSQL_API_BASE_URL=http://127.0.0.1:8000/api/v1
+   MYSQL_API_BASE_URL=https://demo.timetrack.id/api/v1
    MYSQL_API_USERNAME=super@timetrack.id
    MYSQL_API_PASSWORD=your-mysql-api-password
    MYSQL_API_TOKEN_EXPIRY_MS=3600000
 
    # ==========================================
-   # MySQL Assignments Database Connection
+   # PostgreSQL Assignments Database Connection (Primary)
+   # ==========================================
+   DATABASE_URL=postgres://user:password@localhost:5432/resource_planner_assignments
+   # Alternatively:
+   # POSTGRES_URL=postgres://user:password@localhost:5432/resource_planner_assignments
+
+   # ==========================================
+   # MySQL Assignments Database Connection (Fallback)
    # ==========================================
    MYSQL_ASSIGNMENTS_HOST=127.0.0.1
    MYSQL_ASSIGNMENTS_PORT=3306
@@ -239,8 +198,21 @@ npm run dev
 ```
 
 1. Open [http://localhost:3000](http://localhost:3000) in your browser
-2. Login with your Timetrack credentials
-3. Start managing resources!
+2. Login with the credentials provided below.
+
+## Credentials & Login
+
+### Local Development
+| Environment | Email | Password |
+|-------------|-------|----------|
+| **Resource Planner (Local)** | `test.brand@leverategroup.asia` | `password` |
+| **Timetrack API (Local)** | `super@timetrack.id` | `SEMOGABERKAH2023!#` |
+
+### Staging / Demo
+| Environment | URL | Email | Password |
+|-------------|-----|-------|----------|
+| **Resource Planner (Vercel)** | [resource-planner-drab.vercel.app](https://resource-planner-drab.vercel.app/) | `super@timetrack.id` | `SEMOGABERKAH2023!#` |
+| **Timetrack Demo** | [demo.timetrack.id](https://demo.timetrack.id/) | `super@timetrack.id` | `SEMOGABERKAH2023!#` |
 
 ## Available NPM Scripts
 
@@ -263,10 +235,9 @@ npm run test:coverage # Run tests with coverage report
 **Problem**: Resource Planner can't connect to Timetrack API
 
 **Solutions**:
-- Ensure Timetrack is running: `curl http://127.0.0.1:8000/api/v1`
-- Check that `TIMETRACK_API_URL` in `.env.local` points to `http://127.0.0.1:8000/api/v1`
-- Verify Timetrack server is running on port 8000
-- Check Timetrack logs for errors
+- Verify connectivity: `curl https://demo.timetrack.id/api/v1`
+- Check that `TIMETRACK_API_URL` in `.env.local` is set to `https://demo.timetrack.id/api/v1`
+- Check network/firewall settings
 
 ### Database Connection Errors
 **Problem**: Can't connect to MySQL
@@ -327,7 +298,7 @@ The Resource Planner fetches the following data from the Timetrack API:
 
 Environment variables (`.env.local`):
 ```bash
-TIMETRACK_API_URL=http://127.0.0.1:8000/api/v1
+TIMETRACK_API_URL=https://demo.timetrack.id/api/v1
 MYSQL_API_USERNAME=super@timetrack.id
 MYSQL_API_PASSWORD=your-password-here
 MYSQL_API_TOKEN_EXPIRY_MS=3600000
@@ -444,8 +415,9 @@ We welcome contributions to the Resource Planner project! Please follow these gu
 
 1. **Fork and Clone**
    ```bash
-   git clone https://github.com/your-username/resource-planner.git
+   git clone https://github.com/hfebri/resource-planner.git
    cd resource-planner
+   git checkout develop-sarah
    ```
 
 2. **Create a Feature Branch**
